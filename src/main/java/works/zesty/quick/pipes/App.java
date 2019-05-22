@@ -2,12 +2,11 @@ package works.zesty.quick.pipes;
 
 import java.io.IOException;
 import java.util.ArrayList;
-import java.util.Collections;
 import java.util.Date;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
-import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
@@ -25,8 +24,6 @@ import org.slf4j.LoggerFactory;
 import com.ibm.icu.text.SimpleDateFormat;
 import com.practicaldime.zesty.app.AppServer;
 import com.practicaldime.zesty.servlet.RequestContext;
-
-import works.zesty.quick.pipes.App.SearchResults;
 
 public class App {
 	
@@ -60,10 +57,10 @@ public class App {
 			
 			try {
 				Long start = System.nanoTime();
-				CompletableFuture<SearchResults> future = crawlAndSearch(url, config.get("phrase").value, config.get("depth").getInt());
-				SearchResults results = future.join();
-				results.time = TimeUnit.NANOSECONDS.toMillis((System.nanoTime() - start));
+				SearchContext results = crawlAndSearch(url, config.get("phrase").value, config.get("depth").getInt());
 				context.getResp().json(results);
+				Long duration = TimeUnit.NANOSECONDS.toMillis((System.nanoTime() - start));
+				System.out.printf("total duration was %d ms%n", duration/10e6);
 				return CompletableFuture.completedFuture(context);
 			} catch (Exception ex) {
 				ex.printStackTrace(System.err);
@@ -74,9 +71,9 @@ public class App {
 		});
 	}
 
-	public static CompletableFuture<SearchResults> crawlAndSearch(String url, String phrase, int depth) {
+	public static CompletableFuture<SearchContext> crawl(String url, String phrase, int depth, int maxDepth, Set<String> visited) {
 		return CompletableFuture.supplyAsync(() -> {
-			SearchContext search = new SearchContext(url, 1);
+			SearchContext search = new SearchContext(url, depth);
 			search.doc = loadDoc(url);
 			return search;
 		})
@@ -90,10 +87,7 @@ public class App {
 			return res;			
 		})
 		.thenApply(res -> {
-			res.linksFound = findLinksHref(res.doc);
-			return res;
-		})
-		.thenApplyAsync(res -> {
+			res.linksFound = findLinksHref(res.doc);	
 			System.out.printf("Found %d distinct links in '%s'%n", res.linksFound.size(), res.doc.baseUri());
 			int count = res.searchMatches.size();
 			if (count > 0) {
@@ -104,36 +98,35 @@ public class App {
 			} else {
 				System.out.println("=> no matching phrases were found");
 			}
-
-			int newDepth = depth - 1;	
-			if(newDepth == 0) {
-				SearchResults retVal = new SearchResults();
-				if(res != null) {
-					retVal.linksFound.put(res.url, res.linksFound);
-					retVal.searchMatches.put(res.url, res.searchMatches);
-				}
-				return  retVal;
-			}
-			
+			return res;
+		})
+		.thenApply(res -> {
+			Set<String> unvisited = res.linksFound.stream().filter(visited::contains).collect(Collectors.toSet());
+			//return results if depth is reached				
+			int newDepth = res.depth + 1;	
+			if(newDepth > maxDepth) {
+				return res;
+			}				
 			//crawl links found on this url
-			res.doc = null;
-			res.searchMatches = null;
-			CompletableFuture<SearchResults> newRes = res.linksFound.stream().map(href -> crawlAndSearch(href, phrase, newDepth).handle((ctx, th) -> {
-				if(th != null) {
-					System.out.println("************ " + th.getMessage() + " ****************");
-				}
-				return ctx;
-			})).reduce((CompletableFuture<SearchResults> t, CompletableFuture<SearchResults> u) -> {
-				SearchResults aThis = (t.join() != null)? t.join() : new SearchResults();
-				if(u.join() != null) {
-					SearchResults aThat = u.join();
-					aThis.linksFound.putAll(aThat.linksFound);
-					aThis.searchMatches.putAll(aThat.searchMatches);
-				}			
-				return CompletableFuture.completedFuture(aThis);			
-			}).get();
-			return newRes.join();
+			List<CompletableFuture<SearchContext>> children = unvisited.stream()
+			.map(href -> crawl(href, phrase, newDepth, maxDepth, visited)
+				.handle((ctx, th) -> {
+					if(th != null) {
+						System.out.println("************ " + th.getMessage() + " ****************");
+					}
+					return ctx;
+				}))
+			.collect(Collectors.toList());
+			//set children
+			res.children = children.stream().map(child ->  child.join()).collect(Collectors.toSet());
+			return res;
 		});
+	};
+		
+	public static SearchContext crawlAndSearch(String url, String phrase, int depth) {
+		Set<String> visited = new HashSet<>();
+		CompletableFuture<SearchContext> search = crawl(url, phrase, 0, depth, visited);
+		return search.join();
 	}
 	
 	static class Config {
@@ -176,7 +169,8 @@ public class App {
 		public final String url;
 		public final int depth;
 		public Document doc;
-		public Map<String, Optional<SearchContext>> linksFound = new HashMap<>();
+		public Set<SearchContext> children;
+		public Set<String> linksFound;
 		public List<String> searchMatches;
 		
 		public SearchContext(String url, int depth) {
@@ -184,12 +178,11 @@ public class App {
 			this.url = url;
 			this.depth = depth;
 		}
-	}
-	
-	static class SearchResults {
-		public Long time;
-		public Map<String, Set<String>> linksFound = new HashMap<>();
-		public Map<String, List<String>> searchMatches = new HashMap<>();
+
+		@Override
+		public String toString() {
+			return "SearchContext [url=" + url + ", depth=" + depth + ", children=" + children + "]";
+		}
 	}
 	
 	public static Document loadDoc(String url) { //Cherio - JS equivalent of Jsoup
@@ -211,11 +204,11 @@ public class App {
 		return links;
 	}
 
-	public static Map<String, Optional<SearchContext>> findLinksHref(Document doc) {
-		Map<String, Optional<SearchContext>> linksHref = new HashMap<>();
+	public static Set<String> findLinksHref(Document doc) {
+		Set<String> linksHref = new HashSet<>();
 		if(doc != null) {
 			findLinks(doc).stream().forEach(link -> {
-				linksHref.put(link.absUrl("href"), Optional.empty());
+				linksHref.add(link.absUrl("href"));
 			});
 		}
 		return linksHref;

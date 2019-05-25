@@ -1,5 +1,8 @@
 package works.zesty.quick.pipes;
 
+import java.util.Collections;
+import java.util.List;
+import java.util.Map;
 import java.util.concurrent.TimeUnit;
 
 import org.eclipse.jetty.client.HttpClient;
@@ -13,7 +16,7 @@ import works.zesty.quick.pipes.App.SearchContext;
 public class AppClient {
 
 	private static Gson gson = new Gson();
-	private static String hostUrl = "http://localhost:1337/crawl?depth=1&target=";
+	private static String hostUrl = "http://localhost:1337/crawl?depth=2&target=";
 	private static String[] url = {"https://www.nytimes.com/","https://www.msn.com/en-us"};
 
 	public static void main(String[] args) throws Exception {
@@ -27,20 +30,20 @@ public class AppClient {
 		httpClient.start();
 
 		Long start = System.nanoTime();
-		SearchContext results = sendRequest(httpClient, url[1]);
-		System.out.printf("%d search results%n", results);
+		Map<Integer, List<SearchContext>> results = sendRequest(httpClient, url[0]);
+		System.out.printf("%s search results%n", results);
 		
 		System.out.printf("took %d milliseconds%n", TimeUnit.NANOSECONDS.toMillis((System.nanoTime() - start)));
 		// Stop HttpClient
 		httpClient.stop();
 	}
 
-	public static SearchContext sendRequest(HttpClient httpClient, String href) throws Exception {
+	public static Map<Integer, List<SearchContext>> sendRequest(HttpClient httpClient, String href) throws Exception {
 		ContentResponse response = httpClient.newRequest(hostUrl + href).method(HttpMethod.GET).agent("zesty-router client")
 				.send();
 		if (response.getStatus() == 200) {
-			return gson.fromJson(response.getContentAsString(), SearchContext.class);
+			return gson.fromJson(response.getContentAsString(), Map.class);
 		}
-		return new SearchContext(href, 0);
+		return Collections.emptyMap();
 	}
 }

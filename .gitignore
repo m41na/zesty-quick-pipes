@@ -9,6 +9,8 @@ nbproject
 
 # npm artifacts
 **/node_modules
+**/.idea
+*.iml
 
 # Log file
 *.log

@@ -1,13 +1,7 @@
 package works.zesty.quick.pipes;
 
 import java.io.IOException;
-import java.util.ArrayList;
-import java.util.Date;
-import java.util.HashMap;
-import java.util.HashSet;
-import java.util.List;
-import java.util.Map;
-import java.util.Set;
+import java.util.*;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.regex.Matcher;
@@ -57,10 +51,11 @@ public class App {
 			
 			try {
 				Long start = System.nanoTime();
-				SearchContext results = crawlAndSearch(url, config.get("phrase").value, config.get("depth").getInt());
+				CompletableFuture<SearchContext> future = crawl(url, config.get("phrase").value, 0);
+				List<SearchContext> results = crawl(new HashSet<>(), future.join(), config.get("phrase").value, config.get("depth").getInt());
 				context.getResp().json(results);
 				Long duration = TimeUnit.NANOSECONDS.toMillis((System.nanoTime() - start));
-				System.out.printf("total duration was %d ms%n", duration/10e6);
+				System.out.printf("total duration was %f ms%n", duration/10e6);
 				return CompletableFuture.completedFuture(context);
 			} catch (Exception ex) {
 				ex.printStackTrace(System.err);
@@ -71,7 +66,7 @@ public class App {
 		});
 	}
 
-	public static CompletableFuture<SearchContext> crawl(String url, String phrase, int depth, int maxDepth, Set<String> visited) {
+	public static CompletableFuture<SearchContext> crawl(String url, String phrase, int depth) {
 		return CompletableFuture.supplyAsync(() -> {
 			SearchContext search = new SearchContext(url, depth);
 			search.doc = loadDoc(url);
@@ -87,7 +82,7 @@ public class App {
 			return res;			
 		})
 		.thenApply(res -> {
-			res.linksFound = findLinksHref(res.doc);	
+			res.linksFound = findLinksHref(res.doc);
 			System.out.printf("Found %d distinct links in '%s'%n", res.linksFound.size(), res.doc.baseUri());
 			int count = res.searchMatches.size();
 			if (count > 0) {
@@ -99,34 +94,32 @@ public class App {
 				System.out.println("=> no matching phrases were found");
 			}
 			return res;
-		})
-		.thenApply(res -> {
-			Set<String> unvisited = res.linksFound.stream().filter(visited::contains).collect(Collectors.toSet());
-			//return results if depth is reached				
-			int newDepth = res.depth + 1;	
-			if(newDepth > maxDepth) {
-				return res;
-			}				
-			//crawl links found on this url
-			List<CompletableFuture<SearchContext>> children = unvisited.stream()
-			.map(href -> crawl(href, phrase, newDepth, maxDepth, visited)
-				.handle((ctx, th) -> {
-					if(th != null) {
-						System.out.println("************ " + th.getMessage() + " ****************");
-					}
-					return ctx;
-				}))
-			.collect(Collectors.toList());
-			//set children
-			res.children = children.stream().map(child ->  child.join()).collect(Collectors.toSet());
-			return res;
 		});
-	};
-		
-	public static SearchContext crawlAndSearch(String url, String phrase, int depth) {
-		Set<String> visited = new HashSet<>();
-		CompletableFuture<SearchContext> search = crawl(url, phrase, 0, depth, visited);
-		return search.join();
+	}
+
+	public static List<SearchContext> crawl(Set<String> visited, SearchContext res, String phrase, int depth) {
+		//search more while depth is not reached
+		visited.add(res.url);
+		int newDepth = res.depth + 1;
+		if(newDepth < depth) {
+			Set<String> unvisited = res.linksFound.stream().filter(href -> !visited.contains(href)).collect(Collectors.toSet());
+			visited.addAll(res.linksFound);
+			//crawl links found on this url
+			List<SearchContext> contexts = unvisited.stream()
+					.map(href -> crawl(href, phrase, newDepth)
+							.handle((ctx, th) -> {
+								if (th != null) {
+									System.out.println("************ " + th.getMessage() + " ****************");
+								}
+								return ctx;
+							}).join())
+					.collect(Collectors.toList());
+
+			return contexts.stream()
+					.flatMap(child -> crawl(visited, child, phrase, depth).stream())
+					.collect(Collectors.toList());
+		}
+		return Arrays.asList(res);
 	}
 	
 	static class Config {
@@ -168,8 +161,7 @@ public class App {
 
 		public final String url;
 		public final int depth;
-		public Document doc;
-		public Set<SearchContext> children;
+		public transient Document doc;
 		public Set<String> linksFound;
 		public List<String> searchMatches;
 		
@@ -177,11 +169,6 @@ public class App {
 			super();
 			this.url = url;
 			this.depth = depth;
-		}
-
-		@Override
-		public String toString() {
-			return "SearchContext [url=" + url + ", depth=" + depth + ", children=" + children + "]";
 		}
 	}
 	
